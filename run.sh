@@ -1,0 +1,1 @@
+cargo run -q --release
