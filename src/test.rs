@@ -1,4 +1,4 @@
- use std::{
+use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{Arc, Mutex},
@@ -8,112 +8,189 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 // --- 核心类型定义 ---
-// 值（Value）现在是 mpsc::Sender 的克隆体，它实现了 Clone
-type SharedState = Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>;
 
+type SharedContacts = Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>;
+const RESET: &str = "\x1b[0m";
+const RED: &str = "\x1b[31m";
+const GREEN: &str = "\x1b[32m";
+// const YELLOW: &str = "\x1b[33m";
+// const BOLD: &str = "\x1b[1m";
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
-
-    let listener = TcpListener::bind("127.0.0.1:8080").await?;
-    println!("Chat server V0.1 listening on 127.0.0.1:8080");
-
+async fn main() -> () {
+    let contact: SharedContacts = Arc::new(Mutex::new(HashMap::new()));
+    let listener = match TcpListener::bind("127.0.0.1:8080").await {
+        Ok(listener) => {
+            println!("{GREEN}char server connect success!{RESET}");
+            listener
+        }
+        Err(e) => {
+            // 监听失败 println 错误msg 然后结束
+            eprintln!(
+                "{RED}TCPlistener listening 127.0.0.1:8080 Error! chat server error: {:#?}{RESET}",
+                e
+            );
+            return;
+        }
+    };
     loop {
-        let (socket, addr) = listener.accept().await?;
-        println!(">>> New client connected: {}", addr);
-
-        let state_clone = state.clone();
+        //在循环中获取socker and addr  如果成功就返回
+        //如果失败说明某个终端链接到服务器有问题 跳过即可
+        let (socket, addr) = match listener.accept().await {
+            Ok((socket, addr)) => {
+                println!(
+                    "{GREEN}>>> New client connected socket: {:#?} addr: {:#?}{RESET}",
+                    socket, addr
+                );
+                (socket, addr)
+            }
+            Err(e) => {
+                eprintln!("{RED}Error connecting in server loop : {:#?}{RESET}", e);
+                continue;
+            }
+        };
+        //复制通讯录给每一个spawn的线程 和client 每一个连接加入的都会增加通讯录的addr
+        //当需要发送消息 或 需要接受消息的时候需要使用通讯录
+        // 如果有client 断开 那么这个多线程的通讯录需要删除他
+        let contact_clone = contact.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(socket, addr, state_clone).await {
+            // match handle_connection(socket, addr, contact_clone) {
+            //     Ok(_) => {
+            //         //
+            //         println!("{RED}Error connecting in server loop{RESET}");
+            //     }
+            //     Err(e) => {
+            //         eprintln!(
+            //             "Error: {:#?} handling connection from addr: {:#?} socket: {:#?}",
+            //             e, addr, socket
+            //         );
+            //     }
+            // }
+            if let Err(e) = handle_connection(socket, addr, contact_clone).await {
                 // 通常只会在客户端意外断开或代码逻辑错误时发生
                 eprintln!("Error handling connection from {}: {}", addr, e);
             }
         });
     }
+
+    //unimplemented!();
 }
 
 // 客户端连接处理函数
+// 同样需要loop 在主动断开之前 每个clinet都需要
 async fn handle_connection(
     socket: TcpStream,
     addr: SocketAddr,
-    state: SharedState,
+    contact: SharedContacts,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. 为这个新客户端创建一个 mpsc 通道（它的专属“收件箱”）
-    let (tx, mut rx) = mpsc::channel(32);
+    // tx:统一的发送的地方  rx 单独的接受的地方
+    let (tx, mut rx) = mpsc::channel(100);
 
-    // 2. 注册到共享状态（通讯录）
+    //无法在异步状态持有lock
+    //type SharedContacts = Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>;
+    //我这里需要短暂的持有这个在多线程间的hashmap 然后向他添加数据 因为他需要处理来自tokio::spawn产生的东西
+    //只有这一种办法吗
     {
-        // MutexGuard 在块结束时自动解锁
-        let mut map = state.lock().unwrap();
-        map.insert(addr, tx);
+        let mut contact_temp = contact.lock().unwrap();
+        contact_temp.insert(addr, tx);
     }
 
     let (reader, mut writer) = socket.into_split();
+
     let mut reader = BufReader::new(reader);
+    //需要读取的line
     let mut line = String::new();
 
     loop {
         tokio::select! {
-            // --- 分支 A: 从客户端读取输入 (等待 read_line) ---
-            result = reader.read_line(&mut line) => {
-                let bytes_read = match result {
-                    Ok(n) => n,
-                    Err(e) => {
-                        eprintln!("Error reading from {}: {}", addr, e);
-                        break;
-                    }
-                };
+                        //case1: 当前的clinet是发送方 需要读取当前的msg 然后分发给除了自己之外的所有clinet
+                        send_msg = reader.read_line(&mut line) =>{
+                            //
+                            let bytes_read = match send_msg{
+                                Ok(n) => n,
+                                //如果读取当前的msg出现了错误 退出当前的clinet
+                                Err(e) =>{
+                                    eprintln!("Error : {:#?} sending msg{:#?}",e,addr);
+                                    break;
+                                }
+                            };
 
-                // 检查连接是否断开 (EOF)
-                if bytes_read == 0 {
-                    println!("<<< Client {} disconnected.", addr);
-                    break;
-                }
+                            //遇见ctrl+c 或者别的 当前的终端需要推出
+                            if bytes_read == 0{
+                                break;
+                            }
 
-                // 拿到消息，去除首尾空白和换行
-                let msg = line.trim().to_string();
-                println!("[IN] {}: {}", addr, msg);
+                            //去除空格 转换为String·
+                            let msg = line.trim().to_string();
+                            println!("[IN] {}: {}", addr, msg);
 
-                // --- 广播逻辑（修正后的）---
-                // 关键修正：在执行 .await 之前，释放 Mutex
-                let senders: Vec<mpsc::Sender<String>> = {
-                    let map = state.lock().unwrap(); // 🔒 Mutex 被锁定
-                    // 收集所有 Sender 的克隆体
-                    map.values().cloned().collect()
-                }; // 🔒 Mutex 在这里（map 离开作用域时）被自动解锁！
 
-                // 在 Mutex 解锁的情况下，执行 send().await
-                for peer_tx in senders.into_iter() {
-                    if let Err(e) = peer_tx.send(msg.clone()).await {
-                        // 对方的 Receiver 已经被 drop 了，说明对方刚断开，忽略此错误
-                        // 在 v0.2 中，我们可以根据此错误来清理死连接
-                        eprintln!("Failed to send to a peer: {}", e);
-                    }
-                }
+                            //收集多线程的当前的通讯录
+                            let senders:Vec<mpsc::Sender<String>> = {
+                                let contact_temp = contact.lock().unwrap();
+                                //contact_temp.values().cloned().collect()
 
-                line.clear();
-            }
+                                contact_temp.iter()
+                                .filter(|(key, _)| **key != addr)  // 排除掉当前任务的地址对应的 Sender
+                                .map(|(_, sender)| sender.clone())
+                                .collect()
 
-            // --- 分支 B: 从自己的收件箱接收广播消息 (等待 rx.recv) ---
-            Some(msg) = rx.recv() => {
-                writer.write_all(msg.as_bytes()).await?;
-                writer.write_all(b"\n").await?;
-                writer.flush().await?;
-            }
+                            };
+
+                            //消费掉sender
+                            for peer_tx in senders.into_iter(){
+                                // mpsc::Sender 不实现 PartialEq（即不能使用 == 直接比较）
+                                // if peer_tx != tx{
+                                    if let Err(e) = peer_tx.send(msg.clone()).await{
+                                        eprintln!("Failed to send to a peer: {}", e);
+                                    }
+
+                                //}
+                            }
+
+                            //发送完毕
+                            line.clear();
+                        }
+
+                        //case2: 需要接别的client的消息 然后println到自己的屏
+                        Some(_msg) = rx.recv()=>{
+                            // writer.write_all(_msg.as_bytes()).await?;
+                            // writer.write_all(b"\n").await?;
+                            // writer.flush().await?;
+
+                            //使用最粗暴的方式处理错误
+                            if let Err(e) = writer.write_all(_msg.as_bytes()).await {
+                                // 在日志中明确指出是哪个步骤失败了
+                                eprintln!("[ERROR] [Step: WriteMsg] Error writing msg to {}: {}", addr, e);
+                                return Err(e.into());
+                            }
+
+                            // 步骤 2: 写入换行符
+                            if let Err(e) = writer.write_all(b"\n").await {
+                                eprintln!("[ERROR] [Step: WriteNewline] Error writing newline to {}: {}", addr, e);
+                                return Err(e.into());
+                            }
+
+                            // 步骤 3: 刷新
+                            if let Err(e) = writer.flush().await {
+                                eprintln!("[ERROR] [Step: Flush] Error flushing stream to {}: {}", addr, e);
+                                return Err(e.into());
+                            }
+                        }
         }
     }
-
-    // --- 5. 清理阶段：任务退出前执行 ---
+    //如果进入到这一步 说明已经结束了 需要从通讯录删除当前的id
     {
-        let mut map = state.lock().unwrap();
-        map.remove(&addr);
+        //防止async中lock出问题 粗暴的使用mutex 这里 后续改进
+        let mut contact_temp = contact.lock().unwrap();
+        contact_temp.remove(&addr);
     }
     println!(
         "--- Client {} handler finished. Active connections: {}",
         addr,
-        state.lock().unwrap().len()
+        contact.lock().unwrap().len()
     );
 
     Ok(())
+    //unimplemented!();
 }

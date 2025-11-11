@@ -6,7 +6,7 @@ use tokio::net::{ TcpListener, TcpStream };
 use tokio::sync::mpsc;
 
 // --- 核心类型定义 ---
-// 值（Value）现在是 mpsc::Sender 的克隆体，它实现了 Clone
+
 type SharedContacts = Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>;
 const RESET: &str = "\x1b[0m";
 const RED: &str = "\x1b[31m";
