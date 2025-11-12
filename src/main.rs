@@ -1,13 +1,23 @@
 mod test;
 mod test1;
-use std::{ collections::HashMap, net::SocketAddr, sync::{ Arc, Mutex } };
+mod test2;
+use std::{ collections::HashMap, fs::read, net::SocketAddr, sync::{ Arc, Mutex } };
 use tokio::io::{ AsyncBufReadExt, AsyncWriteExt, BufReader };
 use tokio::net::{ TcpListener, TcpStream };
 use tokio::sync::mpsc;
 
 // --- 核心类型定义 ---
 
-type SharedContacts = Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>;
+// 定义一个结构体来保存每个客户端的所有信息
+pub struct ClientInfo {
+    pub addr: SocketAddr, // 客户端的网络地址
+    pub username: String, // 客户端的用户名
+    pub tx: mpsc::Sender<String>, // 客户端的专用收件箱 Sender
+}
+
+// 全局通讯录现在以 String (用户名) 为 Key
+type SharedContacts = Arc<Mutex<HashMap<String, ClientInfo>>>;
+//type SharedContacts = Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>;
 const RESET: &str = "\x1b[0m";
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
@@ -83,20 +93,61 @@ async fn handle_connection(
     contact: SharedContacts
 ) -> Result<(), Box<dyn std::error::Error>> {
     // tx:统一的发送的地方  rx 单独的接受的地方
-    let (tx, mut rx) = mpsc::channel(100);
 
     //无法在异步状态持有lock
     //type SharedContacts = Arc<Mutex<HashMap<SocketAddr, mpsc::Sender<String>>>>;
     //我这里需要短暂的持有这个在多线程间的hashmap 然后向他添加数据 因为他需要处理来自tokio::spawn产生的东西
     //只有这一种办法吗
-    {
-        let mut contact_temp = contact.lock().unwrap();
-        contact_temp.insert(addr, tx);
+
+    let (tx, mut rx) = mpsc::channel(100);
+    let (reader_stream, mut writer) = socket.into_split();
+    let mut reader = BufReader::new(reader_stream);
+    let mut username_line = String::new();
+
+    writer.write_all(b"Enter username: \n").await?;
+    writer.flush().await?;
+
+    if reader.read_line(&mut username_line).await? == 0 {
+        return Ok(());
     }
 
-    let (reader, mut writer) = socket.into_split();
+    let username = username_line.trim().to_string();
+    if username.is_empty() {
+        let err_msg = format!("{RED}username is empty{RESET}\n");
+        let err_msg = format!("{RED}username is empty{RESET}\n");
+        writer.write_all(err_msg.as_bytes()).await?;
+        return Ok(());
+    }
 
-    let mut reader = BufReader::new(reader);
+    //用户名不为空 检测是否重复
+    let mut is_new = false;
+    {
+        let mut contact_gard = contact.lock().unwrap();
+        if contact_gard.contains_key(&username) {
+        } else {
+            //如果没有重复
+            let client_info = ClientInfo {
+                addr,
+                username: username.clone(),
+                tx,
+            };
+            contact_gard.insert(username.clone(), client_info);
+            is_new = true; // 标记注册成功
+            //contact_guard.insert(username.clone(), client_info);
+        }
+    }
+
+    if !is_new {
+        let err_msg = format!("{RED}username: {username} exits!{RESET}\n");
+        writer.write_all(err_msg.as_bytes()).await?;
+        return Ok(());
+    }
+
+    //username不重复
+    println!("{GREEN}User '{}' (from {}) 注册成功.{RESET}", username, addr);
+    let welcome_msg = format!("{GREEN}欢迎, {}! 您现在可以聊天了.{RESET}\n", username);
+    writer.write_all(welcome_msg.as_bytes()).await?;
+
     //需要读取的line
     let mut line = String::new();
 
@@ -120,19 +171,24 @@ async fn handle_connection(
                             }
 
                             //去除空格 转换为String·
-                            let msg = line.trim().to_string();
-                            println!("[IN] {}: {}", addr, msg);
+                            let raw_msg = line.trim().to_string();
+                            let msg = format!("[{username}: {raw_msg}]");
+                            println!("[IN] {} 广播: {}", username, raw_msg);
 
-
+                            
                             //收集多线程的当前的通讯录
                             let senders:Vec<mpsc::Sender<String>> = {
-                                let contact_temp = contact.lock().unwrap();
+                                let contact_guard = contact.lock().unwrap();
+                                contact_guard.iter()
+                                .filter(|(key,_)| **key != username)
+                                .map(|(_,info)| info.tx.clone())
+                                .collect()
                                 //contact_temp.values().cloned().collect()
 
-                                contact_temp.iter()
-                                .filter(|(key, _)| **key != addr)  // 排除掉当前任务的地址对应的 Sender
-                                .map(|(_, sender)| sender.clone())
-                                .collect()
+                                // contact_temp.iter()
+                                // .filter(|(key, _)| **key != addr)  // 排除掉当前任务的地址对应的 Sender
+                                // .map(|(_, sender)| sender.clone())
+                                // .collect()
                                 
                             };
 
@@ -182,10 +238,10 @@ async fn handle_connection(
     {
         //防止async中lock出问题 粗暴的使用mutex 这里 后续改进
         let mut contact_temp = contact.lock().unwrap();
-        contact_temp.remove(&addr);
+        contact_temp.remove(&username);
     }
     println!(
-        "--- Client {} handler finished. Active connections: {}",
+        "--- User '{}' handler finished. 当前活跃连接数: {}{RESET}",
         addr,
         contact.lock().unwrap().len()
     );
