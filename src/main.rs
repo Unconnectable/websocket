@@ -104,43 +104,45 @@ async fn handle_connection(
     let mut reader = BufReader::new(reader_stream);
     let mut username_line = String::new();
 
-    writer.write_all(b"Enter username: \n").await?;
-    writer.flush().await?;
+    let username: String = loop {
+        username_line.clear();
+        writer.write_all(b"Enter username: \n").await?;
+        writer.flush().await?;
 
-    if reader.read_line(&mut username_line).await? == 0 {
-        return Ok(());
-    }
+        if reader.read_line(&mut username_line).await? == 0 {
+            return Ok(());
+        }
 
-    let username = username_line.trim().to_string();
-    if username.is_empty() {
-        let err_msg = format!("{RED}username is empty{RESET}\n");
-        let err_msg = format!("{RED}username is empty{RESET}\n");
-        writer.write_all(err_msg.as_bytes()).await?;
-        return Ok(());
-    }
+        let username = username_line.trim().to_string();
+        if username.is_empty() {
+            let err_msg = format!("{RED}username is empty{RESET}\n");
+            writer.write_all(err_msg.as_bytes()).await?;
+            continue;
+        }
+
+        let is_unique = {
+            let mut contact_gard = contact.lock().unwrap();
+            !contact_gard.contains_key(&username)
+        };
+        if is_unique {
+            break username;
+        } else {
+            let err_msg =
+                format!("{RED}用户名 '{}' 已被占用，请更换后重新输入.{RESET}\n", username);
+            writer.write_all(err_msg.as_bytes()).await?;
+            continue; // 继续循环，要求重新输入
+        }
+    };
 
     //用户名不为空 检测是否重复
-    let mut is_new = false;
     {
         let mut contact_gard = contact.lock().unwrap();
-        if contact_gard.contains_key(&username) {
-        } else {
-            //如果没有重复
-            let client_info = ClientInfo {
-                addr,
-                username: username.clone(),
-                tx,
-            };
-            contact_gard.insert(username.clone(), client_info);
-            is_new = true; // 标记注册成功
-            //contact_guard.insert(username.clone(), client_info);
-        }
-    }
-
-    if !is_new {
-        let err_msg = format!("{RED}username: {username} exits!{RESET}\n");
-        writer.write_all(err_msg.as_bytes()).await?;
-        return Ok(());
+        let client_info = ClientInfo {
+            addr,
+            username: username.clone(),
+            tx,
+        };
+        contact_gard.insert(username.clone(), client_info);
     }
 
     //username不重复
@@ -148,7 +150,7 @@ async fn handle_connection(
     let welcome_msg = format!("{GREEN}欢迎, {}! 您现在可以聊天了.{RESET}\n", username);
     writer.write_all(welcome_msg.as_bytes()).await?;
 
-    //需要读取的line
+    //需要读取的msg line
     let mut line = String::new();
 
     loop {
