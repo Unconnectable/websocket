@@ -1,0 +1,32 @@
+# 服务器目标配置
+host = "127.0.0.1"
+port = 8080
+
+# ----------------------------------------------------
+# 测试步骤列表：程序将顺序执行以下步骤
+# ----------------------------------------------------
+
+[[steps]]
+# 步骤 1: 低并发基础测试
+concurrency = 100
+duration_secs = 20
+# 每个客户端的消息发送间隔 (毫秒)。 (min, max)
+send_interval_ms = [500, 1000] 
+
+[[steps]]
+# 步骤 2: 中等压力测试
+concurrency = 500
+duration_secs = 30
+send_interval_ms = [200, 500] 
+
+[[steps]]
+# 步骤 3: 寻找极限点 (高并发)
+concurrency = 2000
+duration_secs = 45
+send_interval_ms = [100, 300] 
+
+[[steps]]
+# 步骤 4: 极限吞吐量测试 (高并发短间隔)
+concurrency = 3000
+duration_secs = 30
+send_interval_ms = [50, 150]
