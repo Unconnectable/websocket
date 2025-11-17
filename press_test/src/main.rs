@@ -1,114 +1,81 @@
-use clap::Parser;
-use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
-use std::sync::Arc;
-use std::process;
-use tracing_subscriber::{EnvFilter, fmt};
+// press_test/src/main.rs
 
 mod client;
 mod config;
-use client::{run_client, ClientMetrics};
-use config::{load_config, TestConfig};
+mod metrics;
 
-const RED: &str = "\x1b[31m";
-const RESET: &str = "\x1b[0m";
-
-// 使用 clap 宏定义命令行参数，只指定配置文件路径
-#[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
-struct Args {
-    /// 配置文件路径
-    #[arg(short, long, default_value = "config.toml")]
-    config: String,
-}
+use crate::config::load_config;
+use crate::metrics::{save_report_to_json, GlobalMetrics, SharedMetrics};
+use std::sync::Arc;
+use std::time::Instant;
+use tracing::info;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + 'static>> {
-//async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 初始化日志系统
-    fmt().with_env_filter(EnvFilter::from_default_env()).init();
-    
-    let args = Args::parse();
-    
-    let config: TestConfig = match load_config(&args.config) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("读取配置失败: {}. 请确保 '{}' 文件存在。", e, args.config);
-            process::exit(1);
-        }
-    };
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // --- 初始化日志系统 ---
+    let file_appender = tracing_appender::rolling::daily("logs", "press_test.log");
+    let (non_blocking_writer, _guard) = tracing_appender::non_blocking(file_appender);
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env().add_directive("press_test=info".parse()?))
+        .with(fmt::layer().with_writer(non_blocking_writer))
+        .with(fmt::layer())
+        .init();
 
-    println!("--- 🚀 性能测试启动 ---");
-    println!("目标: {}:{}", config.host, config.port);
-    
-    let total_start_time = Instant::now();
-    let mut step_count = 1;
+    // --- 加载配置 ---
+    let config = load_config("config.toml")?;
+    info!("--- 🚀 Starting Chat Server Performance Test ---");
+    info!("Target: {}:{}\n", config.host, config.port);
 
-    // 核心逻辑：顺序执行配置文件中的所有测试步骤
+    // --- 按顺序执行所有测试步骤 ---
     for step in config.steps {
-        println!("\n--- 🏁 开始测试步骤 {} ---", step_count);
-        println!("并发数: {}", step.concurrency);
-        println!("时长: {}s", step.duration_secs);
-        
-        let test_duration = Duration::from_secs(step.duration_secs);
-        let global_stats = Arc::new(Mutex::new(ClientMetrics::default()));
+        info!("--- ▶️ Running Step: '{}' ---", step.name);
+        info!(
+            "Concurrency: {}, Duration: {}s",
+            step.concurrency, step.duration_secs
+        );
+
+        let global_metrics: SharedMetrics = Arc::new(GlobalMetrics::new());
         let mut handles = Vec::new();
         let step_start_time = Instant::now();
 
-        // 启动所有客户端任务
+        // --- 并发启动所有虚拟客户端 ---
         for i in 0..step.concurrency {
             let host = config.host.clone();
-            let stats_clone = global_stats.clone();
+            let port = config.port;
             let step_clone = step.clone();
-            
-            let handle = tokio::spawn(run_client(
-                host,
-                config.port,
-                i,
-                test_duration,
-                step_clone.send_interval_ms,
-                stats_clone,
-            ));
+            // 修复: 修正拼写错误
+            let metrics_clone = global_metrics.clone();
+
+            let handle = tokio::spawn(async move {
+                client::run_client(i, host, port, step_clone, metrics_clone).await;
+            });
             handles.push(handle);
         }
 
-        println!("所有 {} 个客户端已启动...", step.concurrency);
-        
-        // 等待所有任务完成
+        // --- 等待所有客户端任务执行完毕 ---
         for handle in handles {
-            let _ = handle.await; 
+            handle.await?;
         }
 
-        let elapsed_time = step_start_time.elapsed();
-        let total_seconds = elapsed_time.as_secs_f64();
+        let elapsed_duration = step_start_time.elapsed();
 
-        // 汇总结果并计算指标
-        let final_stats = global_stats.lock().await;
-        let total_sent = final_stats.messages_sent;
-        let total_received = final_stats.messages_received;
-        
-        let sent_tps = (total_sent as f64) / total_seconds;
-        let received_tps = (total_received as f64) / total_seconds;
+        // --- 生成并保存报告 ---
+        let final_report =
+            global_metrics.generate_final_report(&step.name, step.concurrency, elapsed_duration);
 
-        println!("--- ✅ 步骤 {} 结果 ---", step_count);
-        println!("测试总时长: {:.2} 秒", total_seconds);
-        println!("并发连接数: {}", step.concurrency);
-        println!("---------------------");
-        println!("总发送消息数: {}", total_sent);
-        println!("总接收消息数: {}", total_received);
-        println!("吞吐量 (发送): {:.2} TPS", sent_tps);
-        println!("吞吐量 (接收/广播): {:.2} TPS", received_tps);
-        // 总转发量 = 总发送量 * (并发数 - 1)
-        println!("总转发消息数 (估计): {} (发送量 * 并发数 - 1)", total_sent.saturating_mul(step.concurrency.saturating_sub(1)));
-        
-        if total_sent == 0 {
-            eprintln!("\n{RED}警告：没有消息被发送，请检查服务器是否正在运行。{RESET}");
+        // 打印一个简短的总结到控制台
+        println!("\n--- Summary for Step: '{}' ---", final_report.step_name);
+        println!("Test Duration: {:.2}s", final_report.test_duration_secs);
+        println!("Receive TPS: {:.2}", final_report.receive_tps);
+        println!("P95 Latency: {:.3}ms", final_report.latency.p95_ms);
+
+        if let Err(e) = save_report_to_json(&final_report) {
+            tracing::error!("Failed to save report: {}", e);
         }
-        
-        step_count += 1;
+
+        info!("--- ✅ Step '{}' Finished ---\n", step.name);
     }
 
-    println!("\n--- 🎉 所有测试步骤完成。总耗时: {:.2} 秒 ---", total_start_time.elapsed().as_secs_f64());
     Ok(())
 }

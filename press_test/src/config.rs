@@ -1,13 +1,17 @@
-use serde::{Deserialize, Serialize};
+// press_test/src/config.rs
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+use serde::Deserialize;
+use std::fs;
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct TestStep {
+    pub name: String,
     pub concurrency: usize,
     pub duration_secs: u64,
-    pub send_interval_ms: (u64, u64),
+    pub think_time_ms: [u64; 2],
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 pub struct TestConfig {
     pub host: String,
     pub port: u16,
@@ -15,7 +19,7 @@ pub struct TestConfig {
 }
 
 pub fn load_config(path: &str) -> Result<TestConfig, Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string(path)?;
+    let content = fs::read_to_string(path)?;
     let config: TestConfig = toml::from_str(&content)?;
     Ok(config)
 }

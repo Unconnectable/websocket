@@ -1,92 +1,106 @@
-use tokio::net::TcpStream;
-use tokio::io::{AsyncWriteExt, BufReader, AsyncBufReadExt};
+// press_test/src/client.rs
+
+use crate::config::TestStep;
+use crate::metrics::{LocalMetrics, SharedMetrics};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::time::{Duration, Instant};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
+use tracing::error;
 
-// 引入可发送的随机数生成器
-use rand::SeedableRng;
-use rand::rngs::SmallRng;
-use rand::Rng; // 仍需要 Rng trait
-
-// 结构体用于收集单个客户端的性能数据 (保持不变)
-#[derive(Debug, Default)]
-pub struct ClientMetrics {
-    pub messages_sent: usize,
-    pub messages_received: usize,
-    pub total_latency_ms: u128,
-}
-
-// 共享的全局统计数据 (保持不变)
-pub type SharedStats = Arc<Mutex<ClientMetrics>>;
-
-// 修复 2 & 3 的类型错误: 将返回的 Error 类型修改为 Box<dyn std::error::Error + Send + 'static>
-// 这样就能满足 tokio::spawn 的 Send 约束。
 pub async fn run_client(
+    client_id: usize,
     host: String,
     port: u16,
-    client_id: usize,
-    duration: Duration,
-    send_interval_ms: (u64, u64),
-    stats: SharedStats,
-) -> Result<(), Box<dyn std::error::Error + Send + 'static>> { // <-- 修复 2: 显式添加 Send 约束
+    step: TestStep,
+    metrics: SharedMetrics,
+) {
+    let mut local_metrics = LocalMetrics::default();
 
     let addr = format!("{}:{}", host, port);
-    let stream = TcpStream::connect(&addr).await?;
-    let (reader_stream, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader_stream);
-    
-    let username = format!("TestUser{}", client_id);
+    let stream = match TcpStream::connect(&addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Client {} failed to connect: {}", client_id, e);
+            local_metrics.login_failures += 1;
+            // 修复: 直接调用封装好的 merge 方法
+            metrics.merge(local_metrics);
+            return;
+        }
+    };
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
     let mut line = String::new();
-    
-    // 修复 3: 使用 SmallRng 并通过随机种子创建，使其可跨线程发送 (Send)
-    let mut rng = SmallRng::from_entropy(); 
 
-    // 1. 握手和认证 (保持不变)
-    reader.read_line(&mut line).await?; 
-    writer.write_all(format!("{}\n", username).as_bytes()).await?;
-    reader.read_line(&mut line).await?; 
+    // 1. 登录握手
+    let username = format!("TestUser-{}", client_id);
+
+    if reader.read_line(&mut line).await.is_err() {
+        local_metrics.login_failures += 1;
+        metrics.merge(local_metrics);
+        return;
+    }
     line.clear();
-    
-    // 2. 消息发送与接收循环 (保持不变)
+
+    if writer
+        .write_all(format!("{}\n", username).as_bytes())
+        .await
+        .is_err()
+    {
+        local_metrics.login_failures += 1;
+        metrics.merge(local_metrics);
+        return;
+    }
+
+    if let Ok(bytes_read) = reader.read_line(&mut line).await {
+        if bytes_read == 0 || line.contains("已被占用") {
+            local_metrics.login_failures += 1;
+            metrics.merge(local_metrics);
+            return;
+        }
+    } else {
+        local_metrics.login_failures += 1;
+        metrics.merge(local_metrics);
+        return;
+    }
+    line.clear();
+
+    // 2. 消息收发循环
     let start_time = Instant::now();
-    let mut metrics = ClientMetrics::default();
-    
-    let (min_send_ms, max_send_ms) = send_interval_ms;
-    
+    let duration = Duration::from_secs(step.duration_secs);
+    let mut rng = SmallRng::from_entropy();
+    let (min_think, max_think) = (step.think_time_ms[0], step.think_time_ms[1]);
+
     while start_time.elapsed() < duration {
-        let interval_ms = rng.gen_range(min_send_ms..=max_send_ms);
-        let next_send_wait = Duration::from_millis(interval_ms);
-        
-        tokio::select! {
-            _ = tokio::time::sleep(next_send_wait) => { 
-                let msg = format!("Hello from client {}", client_id);
-                
-                if let Err(_) = writer.write_all(format!("{}\n", msg).as_bytes()).await {
-                    break; 
-                }
-                metrics.messages_sent += 1;
+        let think_time = rng.gen_range(min_think..=max_think);
+        tokio::time::sleep(Duration::from_millis(think_time)).await;
+
+        let msg = format!("hello from {}", client_id);
+        let send_time = Instant::now();
+
+        if writer
+            .write_all(format!("{}\n", msg).as_bytes())
+            .await
+            .is_err()
+        {
+            local_metrics.send_errors += 1;
+            break;
+        }
+        local_metrics.messages_sent += 1;
+
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Ok(_) => {
+                let latency = send_time.elapsed().as_micros() as u64;
+                // 忽略记录失败的情况 (对于高精度直方图，失败概率极低)
+                let _ = local_metrics.latencies.record(latency);
+                local_metrics.messages_received += 1;
+                line.clear();
             }
-            
-            read_result = reader.read_line(&mut line) => {
-                match read_result {
-                    Ok(0) => break, 
-                    Ok(_) => {
-                        metrics.messages_received += 1;
-                        line.clear();
-                    }
-                    Err(_) => break,
-                }
-            }
+            Err(_) => break,
         }
     }
 
-    // 3. 统计数据合并 (保持不变)
-    let mut shared_stats = stats.lock().await;
-    shared_stats.messages_sent += metrics.messages_sent;
-    shared_stats.messages_received += metrics.messages_received;
-    
-    let _ = writer.write_all(b"/quit\n").await;
-
-    Ok(())
+    // 3. 循环结束，将本地数据合并到全局
+    metrics.merge(local_metrics);
 }

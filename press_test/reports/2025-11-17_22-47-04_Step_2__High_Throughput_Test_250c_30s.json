@@ -1,0 +1,18 @@
+{
+  "step_name": "Step 2: High Throughput Test",
+  "test_duration_secs": 30.278579134,
+  "concurrency": 250,
+  "total_sent": 59609,
+  "total_received": 59609,
+  "total_login_failures": 0,
+  "total_send_errors": 0,
+  "send_tps": 1968.6855098515732,
+  "receive_tps": 1968.6855098515732,
+  "latency": {
+    "mean_ms": 0.011336006307772326,
+    "p50_ms": 0.013,
+    "p95_ms": 0.019,
+    "p99_ms": 0.042,
+    "max_ms": 4.399
+  }
+}
