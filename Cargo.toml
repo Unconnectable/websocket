@@ -7,9 +7,17 @@ edition = "2024"
 tokio = { version = "1.0", features = ["full"] }
 
 # 日志和调试工具
-tracing = "0.1"           # 结构化日志框架，替代 println!
+tracing = "0.1"            # 结构化日志框架，替代 println!
 tracing-subscriber = "0.3" # 日志输出后端
 
 # 错误处理
-anyhow = "1.0"            # 易用的错误处理，适合应用层错误
+anyhow = "1.0" # 易用的错误处理，适合应用层错误
 # 替代方案：thiserror（适合库的错误定义）
+
+[[bin]]
+name = "actor_server"
+path = "actor/main.rs"
+
+[[bin]]
+name = "mutex_server"
+path = "src/main.rs"
