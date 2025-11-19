@@ -6,16 +6,12 @@ mod metrics;
 
 use crate::config::load_config;
 use crate::metrics::{
-    save_report_to_json,
-    GlobalMetrics,
-    SharedMetrics,
-    StepReport,
-    TestRunReport,
+    save_report_to_json, GlobalMetrics, SharedMetrics, StepReport, TestRunReport,
 };
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::info;
-use tracing_subscriber::{ fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter };
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,13 +20,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (non_blocking_writer, _guard) = tracing_appender::non_blocking(file_appender);
 
     // 创建一个写入文件的日志层，并强制禁用ANSI颜色代码
-    let file_layer = fmt::layer().with_writer(non_blocking_writer).with_ansi(false);
+    let file_layer = fmt::layer()
+        .with_writer(non_blocking_writer)
+        .with_ansi(false);
 
     // 创建一个写入控制台的日志层，保持默认的ANSI颜色行为
     let console_layer = fmt::layer();
 
-    tracing_subscriber
-        ::registry()
+    tracing_subscriber::registry()
         .with(EnvFilter::from_default_env().add_directive("press_test=info".parse()?))
         .with(file_layer) // 添加文件层
         .with(console_layer) // 添加控制台层
@@ -47,7 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 按顺序执行所有测试步骤 ---
     for step in config.steps {
         info!("--- ▶️ Running Step: '{}' ---", step.name);
-        info!("Concurrency: {}, Duration: {}s", step.concurrency, step.duration_secs);
+        info!(
+            "Concurrency: {}, Duration: {}s",
+            step.concurrency, step.duration_secs
+        );
 
         let global_metrics: SharedMetrics = Arc::new(GlobalMetrics::new());
         let mut handles = Vec::new();
@@ -72,11 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let elapsed_duration = step_start_time.elapsed();
 
         // 生成单个步骤的报告
-        let step_report = global_metrics.generate_step_report(
-            &step.name,
-            step.concurrency,
-            elapsed_duration
-        );
+        let step_report =
+            global_metrics.generate_step_report(&step.name, step.concurrency, elapsed_duration);
 
         // 打印简短总结到控制台
         println!("\n--- Summary for Step: '{}' ---", step_report.step_name);

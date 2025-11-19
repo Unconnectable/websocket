@@ -1,10 +1,10 @@
 // press_test/src/metrics.rs
 
-use chrono::{ DateTime, Utc };
+use chrono::{DateTime, Utc};
 use hdrhistogram::Histogram;
 use serde::Serialize;
 use std::fs;
-use std::sync::{ Arc, Mutex };
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // 最终的顶层报告结构，对应一个完整的测试运行
@@ -105,7 +105,7 @@ impl GlobalMetrics {
         &self,
         step_name: &str,
         concurrency: usize,
-        duration: Duration
+        duration: Duration,
     ) -> StepReport {
         let guard = self.inner.lock().unwrap();
         let total_seconds = duration.as_secs_f64();
@@ -152,9 +152,8 @@ pub fn save_report_to_json(report: &TestRunReport) -> Result<(), Box<dyn std::er
     fs::create_dir_all(dir)?;
 
     // 使用UTC时间的RFC3339格式作为文件名的一部分，保证唯一且可排序
-    let timestamp = DateTime::parse_from_rfc3339(&report.timestamp_utc)?.format(
-        "%Y-%m-%d_%H-%M-%S"
-    );
+    let timestamp =
+        DateTime::parse_from_rfc3339(&report.timestamp_utc)?.format("%Y-%m-%d_%H-%M-%S");
 
     let filename = format!("{}/run_{}.json", dir, timestamp);
     let report_json = serde_json::to_string_pretty(report)?;

@@ -2,16 +2,15 @@
 
 use crate::connection::SharedContacts;
 use crate::utils::color::{ RED, RESET };
-use tokio::io::{ AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf };
-use tokio::net::TcpStream;
+use tokio::io::{ AsyncBufReadExt, AsyncWriteExt, BufReader };
 use tokio::net::tcp::{ OwnedReadHalf, OwnedWriteHalf };
-
-// 函数签名使用具体类型，使其更易于调用和理解
+use anyhow::{ bail, Result };
+// 用于验证和注册用户名的异步函数``
 pub async fn validate_and_register_username(
     writer: &mut OwnedWriteHalf,
     reader: &mut BufReader<OwnedReadHalf>,
     contact: &SharedContacts
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<String> {
     let mut line = String::new();
     loop {
         line.clear();
@@ -20,7 +19,8 @@ pub async fn validate_and_register_username(
 
         if reader.read_line(&mut line).await? == 0 {
             // 客户端在登录时断开连接，这是一个明确的错误/退出条件
-            return Err("Client disconnected during login".into());
+            //return Err("Client disconnected during login".into());
+            anyhow::bail!("Client disconnected during login");
         }
 
         let username = line.trim().to_string();

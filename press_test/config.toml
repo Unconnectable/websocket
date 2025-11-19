@@ -15,6 +15,6 @@ think_time_ms = [500, 1000]
 
 [[steps]]
 name = "Step 2: High Throughput Test"
-concurrency = 250
-duration_secs = 30
+concurrency = 500
+duration_secs = 60
 think_time_ms = [50, 200]

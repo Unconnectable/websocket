@@ -8,11 +8,14 @@ use tokio::io::{ AsyncBufReadExt, AsyncWriteExt, BufReader };
 use tokio::net::TcpStream;
 use tokio::sync::mpsc; // <--- 添加 mpsc 的 use 语句
 
+use tracing::info;
+use anyhow::Result;
+
 pub async fn handle_connection(
     socket: TcpStream,
     addr: std::net::SocketAddr,
     contact: SharedContacts
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> anyhow::Result<()> {
     let (reader_stream, mut writer) = socket.into_split();
     let mut reader: BufReader<tokio::net::tcp::OwnedReadHalf> = BufReader::new(reader_stream);
 
@@ -32,8 +35,8 @@ pub async fn handle_connection(
         };
         guard.insert(username.clone(), client_info);
     }
-
-    println!("{GREEN}User '{}' (from {}) registered successfully.{RESET}", username, addr);
+    info!(username = %username, peer_addr = %addr, "User registered successfully.");
+    //info!("{GREEN}User '{}' (from {}) registered successfully.{RESET}", username, addr);
     writer.write_all(format!("{GREEN}Welcome, {}!{RESET}\n", username).as_bytes()).await?;
 
     // 4. 进入主事件循环
@@ -62,7 +65,7 @@ pub async fn handle_connection(
 
     // 5. 客户端断开连接后的清理工作
     contact.lock().unwrap().remove(&username);
-    println!(
+    info!(
         "User '{}' disconnected. Active connections: {}",
         username,
         contact.lock().unwrap().len()
